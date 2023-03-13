@@ -1,9 +1,8 @@
-package clickhouse
+package storage
 
 import (
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/dgraph-io/badger/v2"
-	"github.com/pyroscope-io/pyroscope/pkg/storage"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/pyroscope-io/pyroscope/pkg/storage/cache"
 	"github.com/pyroscope-io/pyroscope/pkg/util/bytesize"
 )
@@ -11,13 +10,13 @@ import (
 type ClickHouseDB interface {
 	Update(func(conn clickhouse.Conn) error) error
 	View(func(conn clickhouse.Conn) error) error
-	NewWriteBatch() *badger.WriteBatch
+	NewWriteBatch() driver.Batch
 	MaxBatchCount() int64
 }
 
 type ClickHouseDBWithCache interface {
 	ClickHouseDB
-	storage.CacheLayer
+	CacheLayer
 
 	Size() bytesize.ByteSize
 	CacheSize() uint64

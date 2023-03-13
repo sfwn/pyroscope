@@ -26,7 +26,14 @@ type Config struct {
 	exemplarsBatchQueueSize int
 	exemplarsBatchDuration  time.Duration
 
+	chAddrs []string
+
 	NewBadger func(name string, p Prefix, codec cache.Codec) (BadgerDBWithCache, error)
+}
+
+type CHConfig struct {
+	chAddrs []string
+	NewCH   func(name string)
 }
 
 // NewConfig returns a new storage config from a server config

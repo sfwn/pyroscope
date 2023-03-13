@@ -3,7 +3,6 @@ package cache
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,19 +10,19 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/dgraph-io/badger/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/valyala/bytebufferpool"
 
 	"github.com/pyroscope-io/pyroscope/pkg/storage/cache/lfu"
 )
 
-type Cache struct {
+type ClickHouseCache struct {
 	ch      driver.Conn
-	db      *badger.DB
 	lfu     *lfu.Cache
 	metrics *Metrics
 	codec   Codec
+
+	tableName string
 
 	prefix string
 	ttl    time.Duration
@@ -33,9 +32,8 @@ type Cache struct {
 	flushOnce     sync.Once
 }
 
-type Config struct {
+type ClickHouseConfig struct {
 	clickhouse.Conn
-	*badger.DB
 	*Metrics
 	Codec
 
@@ -47,9 +45,9 @@ type Config struct {
 	TTL time.Duration
 }
 
-// Codec is a shorthand of coder-decoder. A Codec implementation
+// ClickHouseCodec is a shorthand of coder-decoder. A Codec implementation
 // is responsible for type conversions and binary representation.
-type Codec interface {
+type ClickHouseCodec interface {
 	Serialize(w io.Writer, key string, value interface{}) error
 	Deserialize(r io.Reader, key string) (interface{}, error)
 	// New returns a new instance of the type. The method is
@@ -58,20 +56,10 @@ type Codec interface {
 	New(key string) interface{}
 }
 
-type Metrics struct {
-	MissesCounter     prometheus.Counter
-	ReadsCounter      prometheus.Counter
-	DBWrites          prometheus.Observer
-	DBReads           prometheus.Observer
-	WriteBackDuration prometheus.Observer
-	EvictionsDuration prometheus.Observer
-}
-
-func New(c Config) *Cache {
-	cache := &Cache{
-		lfu: lfu.New(),
-		ch:  c.Conn,
-		//db:            c.DB,
+func NewClickHouse(c ClickHouseConfig) *ClickHouseCache {
+	cache := &ClickHouseCache{
+		lfu:           lfu.New(),
+		ch:            c.Conn,
 		codec:         c.Codec,
 		metrics:       c.Metrics,
 		prefix:        c.Prefix,
@@ -113,29 +101,27 @@ func New(c Config) *Cache {
 	return cache
 }
 
-func (cache *Cache) Put(key string, val interface{}) {
+func (cache *ClickHouseCache) Put(key string, val interface{}) {
 	cache.lfu.Set(key, val)
 }
 
-func (cache *Cache) saveToDisk(key string, val interface{}) error {
+func (cache *ClickHouseCache) saveToDisk(key string, val interface{}) error {
 	b := bytebufferpool.Get()
 	defer bytebufferpool.Put(b)
 	if err := cache.codec.Serialize(b, key, val); err != nil {
 		return fmt.Errorf("serialization: %w", err)
 	}
 	cache.metrics.DBWrites.Observe(float64(b.Len()))
-	return cache.db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(cache.prefix+key), b.Bytes())
-	})
+	return cache.ch.Exec(context.Background(), "insert into ? values (?, ?)", cache.tableName, cache.prefix+key, b.Bytes())
 }
 
-func (cache *Cache) Sync() error {
+func (cache *ClickHouseCache) Sync() error {
 	return cache.lfu.Iterate(func(k string, v interface{}) error {
 		return cache.saveToDisk(k, v)
 	})
 }
 
-func (cache *Cache) Flush() {
+func (cache *ClickHouseCache) Flush() {
 	cache.flushOnce.Do(func() {
 		// Make sure there is no pending items.
 		close(cache.lfu.WriteBackChannel)
@@ -151,117 +137,89 @@ func (cache *Cache) Flush() {
 // Evict performs cache evictions. The difference between Evict and WriteBack is that evictions happen when cache grows
 // above allowed threshold and write-back calls happen constantly, making pyroscope more crash-resilient.
 // See https://github.com/pyroscope-io/pyroscope/issues/210 for more context
-func (cache *Cache) Evict(percent float64) {
+func (cache *ClickHouseCache) Evict(percent float64) {
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(cache.metrics.EvictionsDuration.Observe))
 	cache.lfu.Evict(int(float64(cache.lfu.Len()) * percent))
 	timer.ObserveDuration()
 }
 
-func (cache *Cache) WriteBack() {
+func (cache *ClickHouseCache) WriteBack() {
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(cache.metrics.WriteBackDuration.Observe))
 	cache.lfu.WriteBack()
 	timer.ObserveDuration()
 }
 
-func (cache *Cache) Delete(key string) error {
+func (cache *ClickHouseCache) Delete(key string) error {
 	cache.lfu.Delete(key)
-	return cache.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete([]byte(cache.prefix + key))
-	})
+	return cache.ch.Exec(context.Background(), "delete from ? where key = ?", cache.tableName, cache.prefix+key)
 }
 
-func (cache *Cache) Discard(key string) {
+func (cache *ClickHouseCache) Discard(key string) {
 	cache.lfu.Delete(key)
 }
 
 // DiscardPrefix deletes all data that matches a certain prefix
 // In both cache and database
-func (cache *Cache) DiscardPrefix(prefix string) error {
+func (cache *ClickHouseCache) DiscardPrefix(prefix string) error {
 	cache.lfu.DeletePrefix(prefix)
-	return dropPrefix(cache.db, []byte(cache.prefix+prefix))
+	return cache.dropPrefixCH(cache.prefix + prefix)
 }
 
-const defaultBatchSize = 1 << 10 // 1K items
-
-func dropPrefix(db *badger.DB, p []byte) error {
+func (cache *ClickHouseCache) dropPrefixCH(prefix string) error {
 	var err error
 	for more := true; more; {
-		if more, err = dropPrefixBatch(db, p, defaultBatchSize); err != nil {
+		if more, err = cache.dropPrefixBatchCH(prefix); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func dropPrefixBatch(db *badger.DB, p []byte, n int) (bool, error) {
-	keys := make([][]byte, 0, n)
-	err := db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.IteratorOptions{Prefix: p})
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			if len(keys) == cap(keys) {
-				return nil
-			}
-			keys = append(keys, it.Item().KeyCopy(nil))
-		}
-		return nil
-	})
-	if err != nil || len(keys) == 0 {
-		return false, err
-	}
-	batch := db.NewWriteBatch()
-	defer batch.Cancel()
-	for i := range keys {
-		if err = batch.Delete(keys[i]); err != nil {
-			return false, err
-		}
-	}
-	return true, batch.Flush()
+func (cache *ClickHouseCache) dropPrefixBatchCH(prefix string) (bool, error) {
+	err := cache.ch.Exec(context.Background(), "delete from ? where key like '?%'", cache.tableName, prefix)
+	return false, err
 }
 
-func (cache *Cache) GetOrCreate(key string) (interface{}, error) {
+func (cache *ClickHouseCache) GetOrCreate(key string) (interface{}, error) {
 	return cache.get(key, true)
 }
 
-func (cache *Cache) Lookup(key string) (interface{}, bool) {
+func (cache *ClickHouseCache) Lookup(key string) (interface{}, bool) {
 	v, err := cache.get(key, false)
 	return v, v != nil && err == nil
 }
 
-func (cache *Cache) get(key string, createNotFound bool) (interface{}, error) {
+type TableRow struct {
+	k string `db:"k"`
+	v string `db:"v"`
+}
+
+func (cache *ClickHouseCache) get(key string, createNotFound bool) (interface{}, error) {
 	cache.metrics.ReadsCounter.Inc()
-	if cache.ch != nil {
-		// clickhouse
-		cache.ch.Query(context.Background(), "SELECT * FROM "+cache.prefix+key)
-	}
 	return cache.lfu.GetOrSet(key, func() (interface{}, error) {
 		cache.metrics.MissesCounter.Inc()
-		var buf []byte
-		err := cache.db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get([]byte(cache.prefix + key))
-			if err != nil {
-				return err
-			}
-			buf, err = item.ValueCopy(buf)
-			return err
-		})
-
-		switch {
-		default:
+		rows, err := cache.ch.Query(context.Background(), "select v from ? where k = ? limit 1", cache.tableName, key)
+		if err != nil {
 			return nil, err
-		case err == nil:
-		case errors.Is(err, badger.ErrKeyNotFound):
-			if createNotFound {
-				return cache.codec.New(key), nil
+		}
+		defer rows.Close()
+		recordNotFound := true
+		var row TableRow
+		if rows.Next() {
+			recordNotFound = false
+			if err := rows.Scan(&row); err != nil {
+				return nil, err
 			}
-			return nil, nil
+		}
+		if recordNotFound && createNotFound {
+			return cache.codec.New(key), nil
 		}
 
-		cache.metrics.DBReads.Observe(float64(len(buf)))
-		return cache.codec.Deserialize(bytes.NewReader(buf), key)
+		cache.metrics.DBReads.Observe(float64(len(row.v)))
+		return cache.codec.Deserialize(bytes.NewBufferString(row.v), key)
 	})
 }
 
-func (cache *Cache) Size() uint64 {
+func (cache *ClickHouseCache) Size() uint64 {
 	return uint64(cache.lfu.Len())
 }

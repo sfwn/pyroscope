@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/dgraph-io/badger/v2"
 	"github.com/dgraph-io/badger/v2/options"
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,8 +67,17 @@ func (s *Storage) newBadger(name string, p Prefix, codec cache.Codec) (BadgerDBW
 			logger: s.logger.WithField("db", name),
 		}
 
+		ch, err := clickhouse.Open(&clickhouse.Options{
+			Addr:  s.config.chAddrs,
+			Debug: false,
+		})
+		if err != nil {
+			return nil, err
+		}
+
 		if codec != nil {
 			d.Cache = cache.New(cache.Config{
+				Conn:    ch,
 				DB:      badgerDB,
 				Metrics: s.metrics.createCacheMetrics(name),
 				TTL:     s.cacheTTL,
@@ -172,9 +182,10 @@ func (d *db) runGC(discardRatio float64) (reclaimed bool) {
 }
 
 // TODO(kolesnikovae): filepath.Walk is notoriously slow.
-//  Consider use of https://github.com/karrick/godirwalk.
-//  Although, every badger.DB calculates its size (reported
-//  via Size) in the same way every minute.
+//
+//	Consider use of https://github.com/karrick/godirwalk.
+//	Although, every badger.DB calculates its size (reported
+//	via Size) in the same way every minute.
 func calculateDBSize(path string) bytesize.ByteSize {
 	var size int64
 	_ = filepath.Walk(path, func(path string, info os.FileInfo, err error) error {

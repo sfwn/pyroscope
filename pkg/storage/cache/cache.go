@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/dgraph-io/badger/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/valyala/bytebufferpool"
@@ -16,6 +18,7 @@ import (
 )
 
 type Cache struct {
+	ch      driver.Conn
 	db      *badger.DB
 	lfu     *lfu.Cache
 	metrics *Metrics
@@ -30,6 +33,7 @@ type Cache struct {
 }
 
 type Config struct {
+	clickhouse.Conn
 	*badger.DB
 	*Metrics
 	Codec
@@ -64,8 +68,9 @@ type Metrics struct {
 
 func New(c Config) *Cache {
 	cache := &Cache{
-		lfu:           lfu.New(),
-		db:            c.DB,
+		lfu: lfu.New(),
+		ch:  c.Conn,
+		//db:            c.DB,
 		codec:         c.Codec,
 		metrics:       c.Metrics,
 		prefix:        c.Prefix,
