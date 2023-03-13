@@ -35,7 +35,9 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(
 		d.newListCommand(),
 		d.newRemoveCommand(),
-		d.newGetCommand())
+		d.newGetCommand(),
+		d.newMigrateCommand(),
+	)
 
 	return &root
 }
