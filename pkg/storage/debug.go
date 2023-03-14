@@ -1,13 +1,9 @@
 package storage
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
-	"github.com/dgraph-io/badger/v2"
 	"github.com/gorilla/mux"
 )
 
@@ -20,7 +16,7 @@ func (s *Storage) DebugExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	n := mux.Vars(r)["db"]
-	var d BadgerDBWithCache
+	var d ClickHouseDBWithCache
 	switch n {
 	case "segments":
 		d = s.segments
@@ -44,22 +40,23 @@ func (s *Storage) DebugExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	err := d.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(k[0]))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error {
-			_, err = io.Copy(w, bytes.NewBuffer(v))
-			return err
-		})
-	})
-
-	switch {
-	case err == nil:
-	case errors.Is(err, badger.ErrKeyNotFound):
-		http.Error(w, fmt.Sprintf("key %q not found in %s", k[0], n), http.StatusNotFound)
-	default:
-		http.Error(w, fmt.Sprintf("failed to export value for key %q: %v", k[0], err), http.StatusInternalServerError)
-	}
+	_ = d
+	//err := d.View(func(txn *badger.Txn) error {
+	//	item, err := txn.Get([]byte(k[0]))
+	//	if err != nil {
+	//		return err
+	//	}
+	//	return item.Value(func(v []byte) error {
+	//		_, err = io.Copy(w, bytes.NewBuffer(v))
+	//		return err
+	//	})
+	//})
+	//
+	//switch {
+	//case err == nil:
+	//case errors.Is(err, badger.ErrKeyNotFound):
+	//	http.Error(w, fmt.Sprintf("key %q not found in %s", k[0], n), http.StatusNotFound)
+	//default:
+	//	http.Error(w, fmt.Sprintf("failed to export value for key %q: %v", k[0], err), http.StatusInternalServerError)
+	//}
 }

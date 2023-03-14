@@ -109,18 +109,18 @@ func newServerService(c *config.Server) (*serverService, error) {
 
 	svc.debugReporter = debug.NewReporter(svc.logger, svc.storage, prometheus.DefaultRegisterer)
 
-	if svc.config.Auth.JWTSecret == "" {
-		if svc.config.Auth.JWTSecret, err = svc.storage.JWT(); err != nil {
-			return nil, err
-		}
-	}
+	//if svc.config.Auth.JWTSecret == "" {
+	//	if svc.config.Auth.JWTSecret, err = svc.storage.JWT(); err != nil {
+	//		return nil, err
+	//	}
+	//}
 
 	appMetadataSvc := service.NewApplicationMetadataService(svc.database.DB())
-	migrator := NewAppMetadataMigrator(logger, svc.storage, appMetadataSvc)
-	err = migrator.Migrate()
-	if err != nil {
-		svc.logger.Error(err)
-	}
+	//migrator := NewAppMetadataMigrator(logger, svc.storage, appMetadataSvc)
+	//err = migrator.Migrate()
+	//if err != nil {
+	//	svc.logger.Error(err)
+	//}
 	appSvc := service.NewApplicationService(appMetadataSvc, svc.storage)
 
 	// this needs to happen after storage is initiated!

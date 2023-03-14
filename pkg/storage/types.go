@@ -6,8 +6,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/dgraph-io/badger/v2"
 	"github.com/pyroscope-io/pyroscope/pkg/storage/cache"
+	"github.com/pyroscope-io/pyroscope/pkg/storage/types"
 	"github.com/pyroscope-io/pyroscope/pkg/util/bytesize"
 )
 
@@ -78,12 +78,12 @@ type LabelValuesGetter interface {
 // 	DeleteApp(ctx context.Context, appname string) error
 // }
 
-type BadgerDB interface {
-	Update(func(txn *badger.Txn) error) error
-	View(func(txn *badger.Txn) error) error
-	NewWriteBatch() *badger.WriteBatch
-	MaxBatchCount() int64
-}
+//type BadgerDB interface {
+//	Update(func(txn *badger.Txn) error) error
+//	View(func(txn *badger.Txn) error) error
+//	NewWriteBatch() *badger.WriteBatch
+//	MaxBatchCount() int64
+//}
 
 type CacheLayer interface {
 	Put(key string, val interface{})
@@ -96,14 +96,26 @@ type CacheLayer interface {
 	Lookup(key string) (interface{}, bool)
 }
 
-type BadgerDBWithCache interface {
-	BadgerDB
+//type BadgerDBWithCache interface {
+//	BadgerDB
+//	CacheLayer
+//
+//	Size() bytesize.ByteSize
+//	CacheSize() uint64
+//
+//	DBInstance() *badger.DB
+//	CacheInstance() *cache.Cache
+//	Name() string
+//}
+
+type ClickHouseDBWithCache interface {
+	types.ClickHouseDB
 	CacheLayer
 
 	Size() bytesize.ByteSize
 	CacheSize() uint64
 
-	DBInstance() *badger.DB
+	DBInstance() types.ClickHouseDB
 	CacheInstance() *cache.Cache
 	Name() string
 }

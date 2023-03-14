@@ -1,16 +1,18 @@
 package labels
 
 import (
+	"context"
 	"strings"
 
-	"github.com/dgraph-io/badger/v2"
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/pyroscope-io/pyroscope/pkg/storage/types"
 )
 
 type Labels struct {
-	db *badger.DB
+	db types.ClickHouseDB
 }
 
-func New(db *badger.DB) *Labels {
+func New(db types.ClickHouseDB) *Labels {
 	ll := &Labels{
 		db: db,
 	}
@@ -18,32 +20,34 @@ func New(db *badger.DB) *Labels {
 }
 
 func (ll *Labels) PutLabels(labels map[string]string) error {
-	return ll.db.Update(func(txn *badger.Txn) error {
-		for k, v := range labels {
-			if err := txn.SetEntry(badger.NewEntry([]byte("l:"+k), nil)); err != nil {
-				return err
-			}
-			if err := txn.SetEntry(badger.NewEntry([]byte("v:"+k+":"+v), nil)); err != nil {
-				return err
-			}
+	batch, err := ll.db.NewWriteBatch("insert into " + ll.db.FQDN() + " values (?, ?)")
+	if err != nil {
+		return err
+	}
+	for k, v := range labels {
+		if err := batch.Append("l:"+k, nil); err != nil {
+			return err
 		}
-		return nil
-	})
+		if err := batch.Append("v:"+k+":"+v, nil); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
 }
 
 func (ll *Labels) Put(key, val string) {
 	kk := "l:" + key
 	kv := "v:" + key + ":" + val
 	// ks := "h:" + key + ":" + val + ":" + stree
-	err := ll.db.Update(func(txn *badger.Txn) error {
-		return txn.SetEntry(badger.NewEntry([]byte(kk), []byte{}))
+	err := ll.db.Update(func(conn clickhouse.Conn) error {
+		return conn.Exec(context.Background(), "insert into ? values (?, ?)", ll.db.FQDN(), kk, nil)
 	})
 	if err != nil {
 		// TODO: handle
 		panic(err)
 	}
-	err = ll.db.Update(func(txn *badger.Txn) error {
-		return txn.SetEntry(badger.NewEntry([]byte(kv), []byte{}))
+	err = ll.db.Update(func(conn clickhouse.Conn) error {
+		return conn.Exec(context.Background(), "insert into ? values (?, ?)", ll.db.FQDN(), kv, nil)
 	})
 	if err != nil {
 		// TODO: handle
@@ -58,18 +62,25 @@ func (ll *Labels) Put(key, val string) {
 	// }
 }
 
+type TableRow struct {
+	K string `db:"k"`
+	V string `db:"v"`
+}
+
 //revive:disable-next-line:get-return A callback is fine
 func (ll *Labels) GetKeys(cb func(k string) bool) {
-	err := ll.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte("l:")
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			k := item.Key()
-			shouldContinue := cb(string(k[2:]))
+	err := ll.db.View(func(conn clickhouse.Conn) error {
+		rows, err := conn.Query(context.Background(), "select * from ? where k like '?%'", ll.db.FQDN(), "l:")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var kv TableRow
+			if err := rows.Scan(&kv); err != nil {
+				return err
+			}
+			shouldContinue := cb(string(kv.V[2:]))
 			if !shouldContinue {
 				return nil
 			}
@@ -85,22 +96,25 @@ func (ll *Labels) GetKeys(cb func(k string) bool) {
 // Delete removes key value label pair from the storage.
 // If the pair can not be found, no error is returned.
 func (ll *Labels) Delete(key, value string) error {
-	return ll.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete([]byte("v:" + key + ":" + value))
+	return ll.db.Update(func(conn clickhouse.Conn) error {
+		return conn.Exec(context.Background(), "delete from ? where k = ?", ll.db.FQDN(), "v:"+key+":"+value)
 	})
 }
 
 //revive:disable-next-line:get-return A callback is fine
 func (ll *Labels) GetValues(key string, cb func(v string) bool) {
-	err := ll.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte("v:" + key + ":")
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			k := item.Key()
+	err := ll.db.View(func(conn clickhouse.Conn) error {
+		rows, err := conn.Query(context.Background(), "select * from ? where k like '?%'", ll.db.FQDN(), "v:"+key+":")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var kv TableRow
+			if err := rows.Scan(&kv); err != nil {
+				return err
+			}
+			k := kv.K
 			ks := string(k)
 			li := strings.LastIndex(ks, ":") + 1
 			shouldContinue := cb(ks[li:])

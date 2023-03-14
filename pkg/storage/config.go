@@ -27,13 +27,10 @@ type Config struct {
 	exemplarsBatchDuration  time.Duration
 
 	chAddrs []string
+	db      string
 
-	NewBadger func(name string, p Prefix, codec cache.Codec) (BadgerDBWithCache, error)
-}
-
-type CHConfig struct {
-	chAddrs []string
-	NewCH   func(name string)
+	//NewBadger     func(name string, p Prefix, codec cache.Codec) (BadgerDBWithCache, error)
+	NewClickHouse func(name string, p Prefix, codec cache.Codec) (ClickHouseDBWithCache, error)
 }
 
 // NewConfig returns a new storage config from a server config
@@ -59,6 +56,7 @@ func NewConfig(server *config.Server) *Config {
 		exemplarsBatchQueueSize: server.ExemplarsBatchQueueSize,
 		exemplarsBatchDuration:  server.ExemplarsBatchDuration,
 		inMemory:                false,
+		db:                      "pyroscope",
 	}
 }
 

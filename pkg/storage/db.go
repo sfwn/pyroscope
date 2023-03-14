@@ -1,15 +1,14 @@
 package storage
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/dgraph-io/badger/v2"
-	"github.com/dgraph-io/badger/v2/options"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/pyroscope-io/pyroscope/pkg/storage/types"
 	"github.com/sirupsen/logrus"
 
 	"github.com/pyroscope-io/pyroscope/pkg/storage/cache"
@@ -20,7 +19,7 @@ type db struct {
 	name   string
 	logger logrus.FieldLogger
 
-	*badger.DB
+	clickhouse.Conn
 	*cache.Cache
 
 	lastGC  bytesize.ByteSize
@@ -47,107 +46,52 @@ func (p Prefix) trim(k []byte) ([]byte, bool) {
 	return nil, false
 }
 
-func (s *Storage) newBadger(name string, p Prefix, codec cache.Codec) (BadgerDBWithCache, error) {
-	var d *db
-	var err error
+func (s *Storage) newClickHouse(name string, p Prefix, codec cache.Codec) (ClickHouseDBWithCache, error) {
 	logger := logrus.New()
 	logger.SetLevel(s.config.badgerLogLevel)
 
-	if s.config.inMemory {
-		badgerDB, err := badger.Open(badger.DefaultOptions("").
-			WithInMemory(true).
-			WithLogger(logger.WithField("badger", name)))
-		if err != nil {
-			return nil, err
-		}
-
-		d = &db{
-			name:   name,
-			DB:     badgerDB,
-			logger: s.logger.WithField("db", name),
-		}
-
-		ch, err := clickhouse.Open(&clickhouse.Options{
-			Addr:  s.config.chAddrs,
-			Debug: false,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		if codec != nil {
-			d.Cache = cache.New(cache.Config{
-				Conn:    ch,
-				DB:      badgerDB,
-				Metrics: s.metrics.createCacheMetrics(name),
-				TTL:     s.cacheTTL,
-				Prefix:  p.String(),
-				Codec:   codec,
-			})
-		}
-		return d, nil
-	}
-
-	badgerPath := filepath.Join(s.config.badgerBasePath, name)
-	if err = os.MkdirAll(badgerPath, 0o755); err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			// BadgerDB may panic because of file system access permissions. In particular,
-			// if is running in kubernetes with incorrect/unset fsGroup security context:
-			// https://github.com/pyroscope-io/pyroscope/issues/350.
-			err = fmt.Errorf("failed to open database\n\n"+
-				"Please make sure Pyroscope Server has write access permissions to %s directory.\n\n"+
-				"Recovered from panic: %v\n%v", badgerPath, r, string(debug.Stack()))
-		}
-	}()
-
-	badgerDB, err := badger.Open(badger.DefaultOptions(badgerPath).
-		WithTruncate(!s.config.badgerNoTruncate).
-		WithSyncWrites(false).
-		WithCompactL0OnClose(false).
-		WithCompression(options.ZSTD).
-		WithLogger(logger.WithField("badger", name)))
-
+	ch, err := clickhouse.Open(&clickhouse.Options{
+		Addr:  s.config.chAddrs,
+		Debug: false,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	d = &db{
+	var d *db = &db{
 		name:    name,
-		DB:      badgerDB,
 		logger:  s.logger.WithField("db", name),
+		Conn:    ch,
 		gcCount: s.metrics.gcCount.WithLabelValues(name),
 	}
 
 	if codec != nil {
-		d.Cache = cache.New(cache.Config{
-			DB:      badgerDB,
-			Metrics: s.metrics.createCacheMetrics(name),
-			TTL:     s.cacheTTL,
-			Prefix:  p.String(),
-			Codec:   codec,
+		d.Cache = cache.NewClickHouse(cache.ClickHouseConfig{
+			ClickHouseDB: d,
+			Metrics:      s.metrics.createCacheMetrics(name),
+			TTL:          s.cacheTTL,
+			Prefix:       p.String(),
+			Codec:        codec,
 		})
 	}
 
 	s.maintenanceTask(s.badgerGCTaskInterval, func() {
-		diff := calculateDBSize(badgerPath) - d.lastGC
-		if d.lastGC == 0 || s.gcSizeDiff == 0 || diff > s.gcSizeDiff {
-			d.runGC(0.7)
-			d.gcCount.Inc()
-			d.lastGC = calculateDBSize(badgerPath)
-		}
+		//diff := calculateDBSize(badgerPath) - d.lastGC
+		//if d.lastGC == 0 || s.gcSizeDiff == 0 || diff > s.gcSizeDiff {
+		//	d.runGC(0.7)
+		//	d.gcCount.Inc()
+		//	d.lastGC = calculateDBSize(badgerPath)
+		//}
 	})
 
 	return d, nil
 }
 
 func (d *db) Size() bytesize.ByteSize {
-	// The value is updated once per minute.
-	lsm, vlog := d.DB.Size()
-	return bytesize.ByteSize(lsm + vlog)
+	//// The value is updated once per minute.
+	//lsm, vlog := d.DB.Size()
+	//return bytesize.ByteSize(lsm + vlog)
+	return 0
 }
 
 func (d *db) CacheSize() uint64 {
@@ -158,27 +102,32 @@ func (d *db) Name() string {
 	return d.name
 }
 
-func (d *db) DBInstance() *badger.DB {
-	return d.DB
+func (d *db) DBInstance() types.ClickHouseDB {
+	return d
 }
 func (d *db) CacheInstance() *cache.Cache {
 	return d.Cache
 }
 
+func (d *db) Close() error {
+	return d.Conn.Close()
+}
+
 func (d *db) runGC(discardRatio float64) (reclaimed bool) {
-	d.logger.Debug("starting badger garbage collection")
-	for {
-		switch err := d.RunValueLogGC(discardRatio); err {
-		default:
-			d.logger.WithError(err).Warn("failed to run GC")
-			return false
-		case badger.ErrNoRewrite:
-			return reclaimed
-		case nil:
-			reclaimed = true
-			continue
-		}
-	}
+	//d.logger.Debug("starting badger garbage collection")
+	//for {
+	//	switch err := d.RunValueLogGC(discardRatio); err {
+	//	default:
+	//		d.logger.WithError(err).Warn("failed to run GC")
+	//		return false
+	//	case badger.ErrNoRewrite:
+	//		return reclaimed
+	//	case nil:
+	//		reclaimed = true
+	//		continue
+	//	}
+	//}
+	return true
 }
 
 // TODO(kolesnikovae): filepath.Walk is notoriously slow.
@@ -199,4 +148,31 @@ func calculateDBSize(path string) bytesize.ByteSize {
 		return nil
 	})
 	return bytesize.ByteSize(size)
+}
+
+// TODO
+// SELECT database, formatReadableSize(sum(bytes)) AS size FROM system.parts where database = 'monitor' GROUP BY database;
+func (d *db) calculateDBSizeCH(path string) bytesize.ByteSize {
+	return 0
+}
+
+func (d *db) Update(f func(conn clickhouse.Conn) error) error {
+	return f(d.Conn)
+}
+
+func (d *db) View(f func(conn clickhouse.Conn) error) error {
+	return f(d.Conn)
+}
+
+func (d *db) NewWriteBatch(sql string) (driver.Batch, error) {
+	batch, err := d.Conn.PrepareBatch(context.Background(), sql)
+	return batch, err
+}
+
+func (d *db) MaxBatchCount() int64 {
+	return defaultBatchSize
+}
+
+func (d *db) FQDN() string {
+	return d.name
 }

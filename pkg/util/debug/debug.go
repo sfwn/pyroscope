@@ -72,16 +72,16 @@ func CPUUsage(interval time.Duration) float64 {
 
 func (d *Reporter) diskUsageFields() logrus.Fields {
 	fields := make(logrus.Fields)
-	for k, v := range d.storage.DiskUsage() {
-		fields[k] = v
-	}
+	//for k, v := range d.storage.DiskUsage() {
+	//	fields[k] = v
+	//}
 	return fields
 }
 
 func (d *Reporter) cacheStatsFields() logrus.Fields {
 	fields := make(logrus.Fields)
-	for k, v := range d.storage.CacheStats() {
-		fields[k] = v
-	}
+	//for k, v := range d.storage.CacheStats() {
+	//	fields[k] = v
+	//}
 	return fields
 }
